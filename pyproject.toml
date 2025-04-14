@@ -1,0 +1,24 @@
+[project]
+name = "image-deduplicate"
+version = "0.1.0"
+description = "Tool for finding and removing duplicate/similar images"
+authors = [{ name = "Anthony", email = "oips.anthony@gmail.com" }]
+dependencies = ["Pillow>=9.0.0", "imagehash>=4.2.0", "tqdm>=4.60.0"]
+requires-python = ">=3.9"
+readme = "README.md"
+license = { text = "MIT" }
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[tool.pdm]
+distribution = true
+
+[tool.pdm.dev-dependencies]
+
+[tool.pdm.scripts]
+start = "python -m image_deduplicate"
+
+[project.scripts]
+image-deduplicate = "image_deduplicate.main:main"
