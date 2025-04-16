@@ -1,16 +1,37 @@
 import os
+import sys
 import argparse
 import shutil
-from PIL import Image
+import sqlite3
+import collections
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import imagehash
 from tqdm import tqdm
-import collections
-import sqlite3
+from PIL import Image
+from PIL import UnidentifiedImageError
 
 # Supported image file extensions
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff"}
 # Cache database filename
 CACHE_DB_NAME = ".image_hash_cache.db"
+
+
+def hash_worker(image_path, hash_size):
+    """Worker function to calculate image hash."""
+    try:
+        img_hash = imagehash.phash(Image.open(image_path), hash_size=hash_size)
+        return image_path, str(img_hash)
+    except FileNotFoundError:
+        print(f"Warning: File not found {image_path}", file=sys.stderr)
+        return image_path, None
+    except UnidentifiedImageError:
+        print(f"Warning: Cannot identify image file {image_path}", file=sys.stderr)
+        return image_path, None
+    except Exception as e:
+        print(
+            f"Warning: Failed to process {image_path} in worker: {e}", file=sys.stderr
+        )
+        return image_path, None
 
 
 def calculate_hash(image_path, hash_size=8):
@@ -66,7 +87,6 @@ def find_similar_images(input_dir, hash_size=8, threshold=10):
         print(
             f"Found {len(image_files)} image files. Calculating/comparing hashes (multiprocessing)..."
         )
-        from concurrent.futures import ProcessPoolExecutor, as_completed
 
         hash_objects = {}
         processed_count = 0
@@ -99,11 +119,6 @@ def find_similar_images(input_dir, hash_size=8, threshold=10):
                         pass
             return (image_path, None, None, False)
 
-        def hash_worker(args):
-            image_path, hash_size = args
-            img_hash = calculate_hash(image_path, hash_size)
-            return (image_path, img_hash)
-
         # 先查缓存，未命中的再并行计算
         cache_checked = [check_cache(p) for p in image_files]
         cache_hit_items = [item for item in cache_checked if item[3]]
@@ -111,7 +126,7 @@ def find_similar_images(input_dir, hash_size=8, threshold=10):
         cache_hits = len(cache_hit_items)
 
         # 进程池并行计算未命中缓存的图片哈希
-        with ProcessPoolExecutor() as executor, tqdm(
+        with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor, tqdm(
             total=len(image_files), desc="Processing images", unit="file"
         ) as pbar:
             # 先处理缓存命中的
@@ -120,20 +135,21 @@ def find_similar_images(input_dir, hash_size=8, threshold=10):
                 pbar.update(1)
             # 并行处理未命中
             future_to_path = {
-                executor.submit(hash_worker, (image_path, hash_size)): image_path
+                executor.submit(hash_worker, image_path, hash_size): image_path
                 for image_path, _, _, _ in cache_miss_items
             }
             for future in as_completed(future_to_path):
                 image_path = future_to_path[future]
                 img_hash = None
                 try:
-                    img_hash = future.result()[1]
+                    _, img_hash_str = future.result()
+                    if img_hash_str is not None:
+                        img_hash = imagehash.hex_to_hash(img_hash_str)
                 except Exception as e:
                     print(
                         f"\nWarning: Failed to process {os.path.basename(image_path)} in worker: {e}"
                     )
                 if img_hash is not None:
-                    img_hash_str = str(img_hash)
                     hash_results.append((image_path, img_hash, img_hash_str))
                     # 主进程写入缓存
                     try:
@@ -272,7 +288,7 @@ def preview_similar_images(image_paths, max_width=1600):
         print(f"  Preview too wide, resizing to {max_width}x{new_height}")
         try:
             combined_image = combined_image.resize(
-                (max_width, new_height), Image.LANCZOS
+                (max_width, new_height), Image.Resampling.LANCZOS
             )
         except Exception as resize_err:
             print(f"  Error resizing preview: {resize_err}")
