@@ -63,79 +63,108 @@ def find_similar_images(input_dir, hash_size=8, threshold=10):
                 if os.path.splitext(file)[1].lower() in SUPPORTED_EXTENSIONS:
                     image_files.append(os.path.join(root, file))
 
-        print(f"Found {len(image_files)} image files. Calculating/comparing hashes...")
+        print(
+            f"Found {len(image_files)} image files. Calculating/comparing hashes (multiprocessing)..."
+        )
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
         hash_objects = {}
         processed_count = 0
         cache_hits = 0
+        hash_results = []
 
-        with tqdm(
+        def check_cache(image_path):
+            """
+            查询缓存，如果命中，则返回(image_path, img_hash, img_hash_str, True)，否则返回(image_path, None, None, False)
+            """
+            try:
+                current_mtime = os.path.getmtime(image_path)
+            except OSError as e:
+                print(
+                    f"\nWarning: Failed to get file info {os.path.basename(image_path)}: {e}"
+                )
+                return (image_path, None, None, False)
+            cursor.execute(
+                "SELECT mtime, hash_size, hash_value FROM image_hashes WHERE filepath=?",
+                (image_path,),
+            )
+            result = cursor.fetchone()
+            if result:
+                cached_mtime, cached_hash_size, cached_hash_value = result
+                if cached_mtime == current_mtime and cached_hash_size == hash_size:
+                    try:
+                        img_hash = imagehash.hex_to_hash(cached_hash_value)
+                        return (image_path, img_hash, cached_hash_value, True)
+                    except Exception:
+                        pass
+            return (image_path, None, None, False)
+
+        def hash_worker(args):
+            image_path, hash_size = args
+            img_hash = calculate_hash(image_path, hash_size)
+            return (image_path, img_hash)
+
+        # 先查缓存，未命中的再并行计算
+        cache_checked = [check_cache(p) for p in image_files]
+        cache_hit_items = [item for item in cache_checked if item[3]]
+        cache_miss_items = [item for item in cache_checked if not item[3]]
+        cache_hits = len(cache_hit_items)
+
+        # 进程池并行计算未命中缓存的图片哈希
+        with ProcessPoolExecutor() as executor, tqdm(
             total=len(image_files), desc="Processing images", unit="file"
         ) as pbar:
-            for image_path in image_files:
+            # 先处理缓存命中的
+            for image_path, img_hash, img_hash_str, _ in cache_hit_items:
+                hash_results.append((image_path, img_hash, img_hash_str))
+                pbar.update(1)
+            # 并行处理未命中
+            future_to_path = {
+                executor.submit(hash_worker, (image_path, hash_size)): image_path
+                for image_path, _, _, _ in cache_miss_items
+            }
+            for future in as_completed(future_to_path):
+                image_path = future_to_path[future]
                 img_hash = None
-                img_hash_str = None
-
                 try:
-                    current_mtime = os.path.getmtime(image_path)
-                except OSError as e:
+                    img_hash = future.result()[1]
+                except Exception as e:
                     print(
-                        f"\nWarning: Failed to get file info {os.path.basename(image_path)}: {e}"
+                        f"\nWarning: Failed to process {os.path.basename(image_path)} in worker: {e}"
                     )
-                    pbar.update(1)
-                    continue
-
-                # Try to get from cache
-                cursor.execute(
-                    "SELECT mtime, hash_size, hash_value FROM image_hashes WHERE filepath=?",
-                    (image_path,),
-                )
-                result = cursor.fetchone()
-                if result:
-                    cached_mtime, cached_hash_size, cached_hash_value = result
-                    if cached_mtime == current_mtime and cached_hash_size == hash_size:
-                        img_hash_str = cached_hash_value
-                        try:
-                            img_hash = imagehash.hex_to_hash(img_hash_str)
-                            cache_hits += 1
-                        except ValueError:
-                            pass
-
-                # Calculate new hash if not found in cache
-                if img_hash is None:
-                    img_hash = calculate_hash(image_path, hash_size)
-                    if img_hash is None:
-                        pbar.update(1)
-                        continue
+                if img_hash is not None:
                     img_hash_str = str(img_hash)
-
-                    # Store in cache
+                    hash_results.append((image_path, img_hash, img_hash_str))
+                    # 主进程写入缓存
                     try:
+                        current_mtime = os.path.getmtime(image_path)
                         cursor.execute(
                             "INSERT OR REPLACE INTO image_hashes VALUES (?, ?, ?, ?)",
                             (image_path, current_mtime, hash_size, img_hash_str),
                         )
                         conn.commit()
-                    except sqlite3.Error as e:
+                    except Exception as e:
                         print(
                             f"\nWarning: Failed to update cache for {os.path.basename(image_path)}: {e}"
                         )
-
-                # Compare with existing hashes
-                matched = False
-                for existing_hash_str in list(hash_objects.keys()):
-                    existing_hash = hash_objects[existing_hash_str]
-                    distance = img_hash - existing_hash
-                    if distance <= threshold:
-                        hashes[existing_hash_str].append((distance, image_path))
-                        matched = True
-                        break
-
-                if not matched:
-                    hash_objects[img_hash_str] = img_hash
-                    hashes[img_hash_str].append((0, image_path))
-
-                processed_count += 1
                 pbar.update(1)
+
+        # 后续比对逻辑保持不变
+        for image_path, img_hash, img_hash_str in hash_results:
+            if img_hash is None:
+                continue
+            matched = False
+            for existing_hash_str in list(hash_objects.keys()):
+                existing_hash = hash_objects[existing_hash_str]
+                distance = img_hash - existing_hash
+                if distance <= threshold:
+                    hashes[existing_hash_str].append((distance, image_path))
+                    matched = True
+                    break
+            if not matched:
+                hash_objects[img_hash_str] = img_hash
+                hashes[img_hash_str].append((0, image_path))
+            processed_count += 1
 
         print(f"Processed {processed_count} files (cache hits: {cache_hits})")
         print(f"Found {len(hashes)} unique hash groups")
@@ -170,13 +199,12 @@ def copy_unique_images(hashes, output_dir, preview=False):
 
         representative = images[0][1]
         ext = os.path.splitext(representative)[1].lower()
-        dest_path = os.path.join(output_dir, f"{counter:04d}{ext}")
+        orig_name = os.path.basename(representative)
+        dest_path = os.path.join(output_dir, f"{counter}_{orig_name}")
 
         try:
             shutil.copy2(representative, dest_path)
-            print(
-                f"Copied: {os.path.basename(representative)} -> {os.path.basename(dest_path)}"
-            )
+            print(f"Copied: {orig_name} -> {os.path.basename(dest_path)}")
 
             if len(images) > 1 and preview:
                 print(f"  Similar images ({len(images)-1}):")

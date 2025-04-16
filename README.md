@@ -28,7 +28,7 @@ pdm install
 pdm install --dev
 
 # Run the script
-pdm run python main.py <input_directory> <output_directory> [options]
+pdm run python src/image_deduplicate/core.py <input_directory> <output_directory> [options]
 ```
 
 ## Usage
@@ -39,21 +39,21 @@ python main.py <input_directory> <output_directory> [options]
 
 ### Options
 
-- `-t/--threshold`: Similarity threshold (Hamming distance, default 10)
-- `-s/--hash-size`: Hash size (default 8)
-- `-p/--preview`: Enable similar image preview
+- `-t/--threshold`：哈希距离阈值（Hamming distance，默认 10，数值越小越严格）
+- `-s/--hash-size`：哈希尺寸（默认 8，数值越大越精确但速度较慢）
+- `-p/--preview`：启用相似图片分组预览（需要图形界面支持）
 
 ## Examples
 
 ```bash
-# Basic usage
-python main.py ~/Pictures/input ~/Pictures/unique
+# 基本用法
+python src/image_deduplicate/core.py ~/Pictures/input ~/Pictures/unique
 
-# Stricter similarity comparison (threshold 5)
-python main.py ~/Pictures/input ~/Pictures/unique -t 5
+# 更严格的相似度比较（阈值 5）
+python src/image_deduplicate/core.py ~/Pictures/input ~/Pictures/unique -t 5
 
-# Enable preview mode
-python main.py ~/Pictures/input ~/Pictures/unique -p
+# 启用预览模式
+python src/image_deduplicate/core.py ~/Pictures/input ~/Pictures/unique -p
 ```
 
 ## How It Works
